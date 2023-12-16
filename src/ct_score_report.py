@@ -2,7 +2,7 @@
 # coding: utf-8
 
 from ctetl.ct_helpers import get_db_credentials, create_sqlalchemy_engine
-from ctetl.ctetl import query_report_data_from_db, fill_missing_timesteps, generate_report, save_report_to_csv
+from ctetl.ct_reporting import query_report_data_from_db, generate_report, save_report_to_csv
 
 def main():
     pguser, pgpasswd, pghost, pgport = get_db_credentials()

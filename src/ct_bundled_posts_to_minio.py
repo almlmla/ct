@@ -4,7 +4,7 @@
 import os
 
 from ctetl.ct_helpers import create_minio_client, check_buckets, request_with_backoff
-from ctetl.ctetl import get_initial_start_and_end, get_and_save_ct_post_aggregates, get_posts_next_page_url
+from ctetl.ct_extract import get_initial_start_and_end, get_and_save_ct_post_aggregates, get_posts_next_page_url
 
 def main():
     # request_headers and ct_key must be defined
