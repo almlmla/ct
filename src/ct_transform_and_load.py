@@ -1,6 +1,4 @@
 #!/home/pscripts/venv/bin/python
-# coding: utf-8
-
 
 from ctetl.ct_helpers import create_minio_client, check_minio_buckets, create_minio_tags
 from ctetl.ct_helpers import get_minio_object_names, get_minio_response_js
