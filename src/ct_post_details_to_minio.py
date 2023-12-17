@@ -1,46 +1,43 @@
-
 #!/home/pscripts/venv/bin/python
-# coding: utf-8
 
-from datetime import datetime, timedelta, timezone
-import json
-import os
+from ctetl.ct_helpers import get_request_parameters
+from ctetl.ct_helpers import create_minio_client, check_minio_buckets
+from ctetl.ct_helpers import create_minio_tags, get_minio_object_names
+from ctetl.ct_extract import process_post_object
 
-import requests
-
-from minio.commonconfig import Tags
-
-from ctetl.ct_helpers import create_minio_client, check_buckets
-from ctetl.ct_extract import process_post_object, get_and_save_post_details, upload_post_details
 
 def main():
-    # request_headers and ct_key must be defined
-    request_headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5_2) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Safari/605.1.15"
-    }
-
-    ct_key = os.environ.get("CT_KEY")
+    # load request parameters to use
+    REQUEST_HEADERS, CT_KEY = get_request_parameters()
 
     # Input from posts_bucket, output to details_bucket
     posts_bucket = "ct-posts"
     details_bucket = "ct-post-details"
-    
-    minio_client = create_minio_client()
-    
-    # Proceed only if both bucket are found
-    check_buckets(minio_client, [posts_bucket, details_bucket])
-    
-    # Prepare to tag posts to keep from processing objects more than once
-    tags = Tags.new_object_tags()
-    tags["processed"] = "true"
 
-    # Set number of API calls to track and limit calls to CrowdTangle as a global variable
+    minio_client = create_minio_client()
+
+    # Proceed only if both bucket are found
+    check_minio_buckets(minio_client, posts_bucket, details_bucket)
+
+    # Prepare to tag posts to keep from processing them more than once
+    tags = create_minio_tags()
+
+    # Set number of API calls to track and limit calls to CrowdTangle
     num_calls = 0
 
-    # Get post objects saved in MinIO and loop through each to process
-    post_objects = minio_client.list_objects(posts_bucket)
-    for post_obj in post_objects:
-        process_post_object(tags, num_calls, request_headers, ct_key, minio_client, posts_bucket, details_bucket, post_obj)
+    # Get post object names saved in posts_bucket and loop through each to process
+    post_object_names = get_minio_object_names(minio_client, posts_bucket)
+    for post_object_name in post_object_names:
+        process_post_object(
+            tags,
+            num_calls,
+            REQUEST_HEADERS,
+            CT_KEY,
+            minio_client,
+            posts_bucket,
+            details_bucket,
+            post_object_name,
+        )
 
 
 if __name__ == "__main__":

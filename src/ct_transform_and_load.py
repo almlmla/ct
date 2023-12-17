@@ -2,18 +2,9 @@
 # coding: utf-8
 
 
-from ctetl.ct_helpers import (
-    create_minio_client,
-    check_minio_buckets,
-    create_minio_tags,
-    get_minio_object_names,
-    get_minio_response_js,
-)
-from ctetl.ct_tl import (
-    transform_post_details,
-    queries_for_insert,
-    insert_to_postgres,
-)
+from ctetl.ct_helpers import create_minio_client, check_minio_buckets, create_minio_tags
+from ctetl.ct_helpers import get_minio_object_names, get_minio_response_js
+from ctetl.ct_tl import transform_post_details, queries_for_insert, insert_to_postgres
 
 
 def main():
@@ -24,7 +15,7 @@ def main():
     details_bucket = "ct-post-details"
 
     # Proceed only if both bucket are found
-    check_minio_buckets(minio_client, [details_bucket])
+    check_minio_buckets(minio_client, details_bucket)
 
     # Prepare to tag post details to keep from processing them more than once
     tags = create_minio_tags()

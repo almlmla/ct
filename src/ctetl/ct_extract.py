@@ -1,139 +1,195 @@
 # ct_extract.py
 
-import io
-import json
-import os
 import sys
 
 from datetime import datetime, timedelta, timezone
-
-from minio import Minio
-from minio.commonconfig import Tags
-from minio.error import S3Error
-
-import pandas as pd
-
-import psycopg2
-
-import requests
-from requests.adapters import HTTPAdapter
-from requests.packages.urllib3.util.retry import Retry
-
-
-from sqlalchemy import create_engine, text
 from time import sleep
 
-from .ct_helpers import request_with_backoff
+from minio.error import S3Error
 
-# Used by ct_posts_to_minio
-def get_initial_start_and_end(client, bucket):
-    # Very first start if bucket is empty
-    very_first_start_str = "2023-12-10 05:00:00"
+from .ct_helpers import get_minio_object_names, request_with_backoff
+from .ct_helpers import minio_put_text_object
+from .ct_helpers import get_minio_response_js, isoformat_to_seconds
 
-    # Window of posts to get from CrowdTangle
-    time_window = timedelta(hours=1)
 
-    # The latest post date from now() to get from CrowdTangle
-    # Post performance changes with its lifespan
-    latest_hours = 72
+### Functions of ct_bundled_posts_to_minio
+def get_initial_start_and_end(minio_client, posts_bucket):
+    """
+    Used by ct_bundled_posts_to_minio.
 
-    # Assign latest_start
+    Start from maiden start if posts_bucket is empty.  Otherwise, start from
+    end of latest post in posts_bucket.
+
+    """
+
+    # Define chosen maiden start in case posts_bucket is empty
+    # Need to format as '%Y-%m-%d %H:%M:%S'
+    MAIDEN_START_STR = "2023-12-10 05:00:00"
+
+    # Get posts dated from start+TIME_WINDOW from CrowdTangle.
+    # The bigger this window, the more posts will be returned
+    # but the risk of getting HTTP response failures is higher.
+    TIME_WINDOW = timedelta(hours=1)
+
+    # datetime.now - START_LIMIT hours is the latest posting date
+    # of posts to get from CrowdTangle. Post performance changes
+    # with its lifespan and so posts should be allowed to age before
+    # getting post data from CrowdTangle for analysis.  However, this
+    # should also be balanced for relevance of information.
+    # 72 hours was chose as a compromise between both considerations.
+    START_LIMIT_HOURS = 72
+
+    # Assign start_limit from START_LIMIT_HOURS
     now = datetime.now(timezone.utc).replace(tzinfo=None)
-    latest_start = now - timedelta(hours=latest_hours)
+    start_limit = now - timedelta(hours=START_LIMIT_HOURS)
 
-    # Get the last run start
-    start = get_latest_post_start(client, bucket, very_first_start_str)
+    # Determine start by comparing MAIDEN_START_STR with the timestamp of
+    # the latest post in posts_bucket
+    start = set_start(minio_client, posts_bucket, MAIDEN_START_STR)
 
-    # Exit this run if start > latest_start
-    if start > latest_start:
-        print("All caught up and too early to start!")
+    # Exit this run normally if start > start_limit
+    if start > start_limit:
+        print("Too early to get new post data!")
         sys.exit(0)
 
-    end = start + time_window
+    end = start + TIME_WINDOW
 
+    # Also return 'now' as it is used in object naming
     return start, end, now
 
 
-# Used by ct_posts_to_minio
-def get_latest_post_start(client, bucket, very_first_start_str):
-    # Find last run from end time and determine start for this run
-    post_objects = client.list_objects(bucket)
+def set_start(minio_client, posts_bucket, MAIDEN_START_STR):
+    """
+    Used by ct_bundled_posts_to_minio.
 
-    post_obj_names = [post_obj.object_name for post_obj in post_objects]
-    if post_obj_names:
-        post_obj_names.sort()
-        start = datetime.strptime(post_obj_names[-1].split("_")[1], "%Y-%m-%dT%H:%M:%S")
+    Find end time of latest post in bucket
+    If post_object_names is empty (no data in posts_bucket)
+    then return start as datetime object of MAIDEN_START_STR.
+
+    """
+
+    post_object_names = get_minio_object_names(minio_client, posts_bucket)
+
+    if post_object_names:
+        post_object_names.sort()
+        # Get end timestamp from last element of the sorted post_obj_names.
+        # End timestamp index position is dependent on object naming convention
+        # of ct_bundled_posts_to_minio!
+        start = datetime.strptime(
+            post_object_names[-1].split("_")[1], "%Y-%m-%dT%H:%M:%S"
+        )
     else:
-        start = datetime.strptime(very_first_start_str, "%Y-%m-%d %H:%M:%S")
+        start = datetime.strptime(MAIDEN_START_STR, "%Y-%m-%d %H:%M:%S")
 
     return start
 
 
-# Used by ct_posts_to_minio
-def get_and_save_ct_post_aggregates(url, request_headers, client, bucket, as_of, end_str, start_str, page):
+def get_and_save_ct_post_aggregates(
+    url, REQUEST_HEADERS, minio_client, posts_bucket, as_of, end_str, start_str, page
+):
+    """
+    Used by ct_bundled_posts_to_minio.
 
-    response = request_with_backoff(url, request_headers)
+    Get bundled posts data from CrowdTangle and save to posts_bucket.
 
-    if response is None:
+    """
+
+    request_response = request_with_backoff(url, REQUEST_HEADERS)
+
+    if request_response is None:
+        # request_with_backoff prints the error message.
         sys.exit(1)
     else:
-        response_bytes = io.BytesIO(response.text.encode("utf-8"))
-        obj_name = as_of + "_" + end_str + "_" + start_str + "_" + str(page) + ".txt"
-
-    try:
-        client.put_object(
-            bucket_name=bucket,
-            object_name=obj_name,
-            data=response_bytes,
-            length=len(response_bytes.getvalue()),
-            content_type="text/plain",
+        # Naming convention important in determining start times with set_start
+        # Use caution if modifying!
+        post_object_name = (
+            as_of + "_" + end_str + "_" + start_str + "_" + str(page) + ".txt"
         )
-        return response
-    except S3Error as e:
-        print(f"S3 Error:{e}")
-        sys.exit(1)
+        try:
+            minio_put_text_object(
+                minio_client, posts_bucket, post_object_name, request_response
+            )
+            return request_response
+        except S3Error as e:
+            print(f"S3 Error:{e}")
+            sys.exit(1)
 
 
-# Used by ct_posts_to_minio
-def get_posts_next_page_url(response):
+def get_posts_next_page_url(request_response):
+    """
+    Used by ct_bundled_posts_to_minio.
+
+    Determine next url from current response.  Return None if nextPage doesn't exist.
+
+    """
+
     try:
-        response_js = response.json()
-        return response_js["result"]["pagination"]["nextPage"]
+        request_response_js = request_response.json()
+        return request_response_js["result"]["pagination"]["nextPage"]
     except KeyError:
         return None
 
 
-# Used by ct_post_details_to_minio
-def process_post_object(tags, num_calls, request_headers, ct_key, client, posts_bucket, details_bucket, post_obj):
+### Functions of ct_post_details_to_minio.
+
+
+def process_post_object(
+    tags,
+    num_calls,
+    request_headers,
+    ct_key,
+    minio_client,
+    posts_bucket,
+    details_bucket,
+    post_object_name,
+):
     """
+    Used by ct_post_details_to_minio.
+
     Find details on posts from aggregate post details stored in posts_bucket in MinIO.
-    Call downstream process.
+    Cascade to downstream process.
     """
-    post_obj_name = post_obj.object_name
-    tagged = client.get_object_tags(posts_bucket, post_obj_name)
+    tagged = minio_client.get_object_tags(posts_bucket, post_object_name)
 
     # Process only if not tagged
     if not tagged:
-        try:
-            minio_response = client.get_object(posts_bucket, post_obj_name)
-            minio_response_js = json.loads(minio_response.data.decode())
-        except S3Error as e:
-            print(f"S3 Error getting object:{e}")
-            sys.exit(1)
-        finally:
-            minio_response.close()
-            minio_response.release_conn()
+        minio_response_js = get_minio_response_js(
+            post_object_name, posts_bucket, minio_client
+        )
+        get_and_save_post_details(
+            tags,
+            num_calls,
+            request_headers,
+            ct_key,
+            minio_client,
+            posts_bucket,
+            details_bucket,
+            post_object_name,
+            minio_response_js,
+        )
 
-        get_and_save_post_details(tags, num_calls, request_headers, ct_key, client, posts_bucket, details_bucket, post_obj_name, minio_response_js)
 
-# Used by ct_post_details_to_minio
-def get_and_save_post_details(tags, num_calls, request_headers, ct_key, client, posts_bucket, details_bucket, post_obj_name, minio_response_js):
+def get_and_save_post_details(
+    tags,
+    num_calls,
+    request_headers,
+    ct_key,
+    minio_client,
+    posts_bucket,
+    details_bucket,
+    post_object_name,
+    minio_response_js,
+):
     """
-    Request post details from CrowdTangle.  Ensure that request_headers and ct_key are defined globally.
-    Call downstream process.  Tag the aggregate post object as processed once all post details of the aggregate
-    are uploaded. Ensure that tags are defined globally.
+    Used by ct_post_details_to_minio.
+
+    Request post details from CrowdTangle.  Ensure that tags are defined globally. Ensure
+    that request_headers and ct_key are defined globally. Call downstream process.  Tag
+    the aggregate post object as processed once all post details of the aggregate
+    are uploaded.
     """
 
+    # Post details are uniquely identified by platformId
     # Number of posts in minio_response_js is half the count of platformId
     for i in range(str(minio_response_js).count("platformId") // 2):
         platform_id = minio_response_js["result"]["posts"][i]["platformId"]
@@ -141,43 +197,41 @@ def get_and_save_post_details(tags, num_calls, request_headers, ct_key, client, 
         # URL for specific posts
         url = f"https://api.crowdtangle.com/post/{platform_id}?token={ct_key}&includeHistory=True"
 
-        # Have to use global variable to ensure CrowdTangle API request limits are respected
-        # Limit is 6 calls/minute
+        # If num_calls >5, sleep for 60 seconds to accommodate and respect
+        # CrowdTangle's API rate limit of 6 calls/minute
         if num_calls > 5:
             sleep(60)
             num_calls = 0
 
-        response = request_with_backoff(url, request_headers)
+        request_response = request_with_backoff(url, request_headers)
         num_calls += 1
 
-        if response is None:
+        if request_response is None:
             sys.exit(1)
         else:
-            upload_post_details(client, posts_bucket, details_bucket, post_obj_name, platform_id, response)
+            upload_post_details(
+                minio_client, details_bucket, platform_id, request_response
+            )
 
-    client.set_object_tags(posts_bucket, post_obj_name, tags)
+    # Tag post_object after processing to prevent reprocessing
+    minio_client.set_object_tags(posts_bucket, post_object_name, tags)
 
-# Used by ct_post_details_to_minio
-def upload_post_details(client, posts_bucket, details_bucket, post_obj_name, platform_id, response):
+
+def upload_post_details(minio_client, details_bucket, platform_id, request_response):
     """
+    Used by ct_post_details_to_minio.
+
     Upload post details to MinIO bucket.
     """
     # as_of will form part of the name of the post_details object
     now = datetime.now(timezone.utc).replace(tzinfo=None)
-    as_of = now.isoformat(timespec="seconds")
-
-    response_bytes = io.BytesIO(response.text.encode("utf-8"))
-    detail_name = f"{platform_id}_{as_of}_.txt"
+    as_of = isoformat_to_seconds(now)
+    details_object_name = f"{platform_id}_{as_of}_.txt"
 
     try:
-        client.put_object(
-            bucket_name=details_bucket,
-            object_name=detail_name,
-            data=response_bytes,
-            length=len(response_bytes.getvalue()),
-            content_type="text/plain",
+        minio_put_text_object(
+            minio_client, details_bucket, details_object_name, request_response
         )
-
     except S3Error as e:
         print(f"S3 Error putting object:{e}")
         sys.exit(1)

@@ -10,7 +10,10 @@ from .ct_helpers import load_db_credentials
 
 
 def load_columns_to_extract():
-    """ """
+    """
+    Used by ct_transform_and_load.
+
+    """
 
     ACCOUNTS_COLS = [
         "account.id",
@@ -53,6 +56,8 @@ def load_columns_to_extract():
 
 def load_column_remaps():
     """
+    Used by ct_transform_and_load.
+
     Remap/rename columns to ensure compatibility with SQL
     """
 
@@ -90,8 +95,13 @@ def load_column_remaps():
 
 
 def queries_for_insert():
-    # Define INSERT statements with placeholders.  Query inserts
-    # only if record doesn't exist
+    """
+    Used by ct_transform_and_load.
+
+    Define INSERT statements with placeholders.
+    Query inserts only if record doesn't exist
+    """
+
     ACCOUNTS_INSERT_QUERY = "INSERT INTO accounts VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (account_id) DO NOTHING"
     POSTS_INSERT_QUERY = "INSERT INTO posts VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (platform_id) DO NOTHING"
     POST_METRICS_INSERT_QUERY = "INSERT INTO post_metrics VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (platform_id, as_of, score, metric_name, metric_value, metric_timestamp, metric_timestep) DO NOTHING"
@@ -101,6 +111,8 @@ def queries_for_insert():
 
 def recast_accounts(accounts_df):
     """
+    Used by ct_transform_and_load.
+
     Recast dtypes prior to uploading to PostgreSQL.
     """
 
@@ -131,6 +143,8 @@ def recast_accounts(accounts_df):
 
 def recast_posts(posts_df):
     """
+    Used by ct_transform_and_load.
+
     Recast dtypes prior to uploading to PostgreSQL.
     """
 
@@ -152,6 +166,8 @@ def recast_posts(posts_df):
 
 def recast_post_metrics(post_metrics_df):
     """
+    Used by ct_transform_and_load.
+
     Recast dtypes prior to uploading to PostgreSQL.
     """
 
@@ -171,6 +187,12 @@ def recast_post_metrics(post_metrics_df):
 
 
 def transform_post_details(minio_response_js, detail_object_name):
+    """
+    Used by ct_transform_and_load.
+
+    Transform post details data in preparation for uploading to PostgreSQL.
+
+    """
     accounts_cols, posts_cols, post_metrics_cols = load_columns_to_extract()
     (
         accounts_cols_remap,
@@ -235,6 +257,13 @@ def insert_to_postgres(
     posts_to_insert,
     post_metrics_to_insert,
 ):
+    """
+    Used by ct_transform_and_load.
+
+    Upload transformed data to PostgreSQL.
+
+    """
+
     PGUSER, PGPASSWD, PGHOST, PGPORT, PGDB = load_db_credentials()
 
     try:
