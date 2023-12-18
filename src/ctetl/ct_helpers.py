@@ -35,6 +35,7 @@ def get_request_parameters():
     CT_KEY = os.environ.get("CT_KEY")
     if CT_KEY is None:
         print("CT_KEY is empty.  Is it defined in the environment?")
+        sys.exit(1)
     else:
         return REQUEST_HEADERS, CT_KEY
 
@@ -57,6 +58,7 @@ def load_db_credentials():
         print(
             "At least one of the PostgreSQL parameters is empty.  Are they defined in the environment?"
         )
+        sys.exit(1)
     else:
         return PGUSER, PGPASSWD, PGHOST, PGPORT, PGDB
 
