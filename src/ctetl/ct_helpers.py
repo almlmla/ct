@@ -82,6 +82,7 @@ def create_minio_client():
         print(
             "At least one of the MinIO parameters is empty.  Are they defined in the environment?"
         )
+        sys.exit(1)
     else:
         # Modify 'secure' to your configuration
         return Minio(MINIO_HOST, MINIO_ACCESS, MINIO_SECRET, secure=False)
@@ -138,7 +139,7 @@ def get_minio_response_js(object_name, bucket, client):
         minio_response = client.get_object(bucket, object_name)
         minio_response_js = json.loads(minio_response.data.decode())
     except S3Error as e:
-        print(f"S3 Error getting object:{e}")
+        print(f"S3 Error getting object: {e}")
         sys.exit(1)
     finally:
         minio_response.close()
