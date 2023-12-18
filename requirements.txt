@@ -1,0 +1,6 @@
+minio==7.2.0
+pandas==2.0.3
+psycopg2==2.9.9
+pytest==7.4.0
+Requests==2.31.0
+SQLAlchemy==1.4.39
