@@ -6,13 +6,12 @@ import sys
 
 from datetime import datetime
 from minio import Minio
-
-# from minio.error import S3Error
+from minio.error import S3Error
 
 import requests
 from sqlalchemy import create_engine
 
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock, call, patch
 from unittest.mock import Mock
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
@@ -24,10 +23,61 @@ from ctetl.ct_helpers import check_minio_buckets
 from ctetl.ct_helpers import create_minio_tags
 from ctetl.ct_helpers import get_minio_object_names
 from ctetl.ct_helpers import get_minio_response_js
-from ctetl.ct_helpers import S3Error
 from ctetl.ct_helpers import request_with_backoff
 from ctetl.ct_helpers import isoformat_to_seconds
 from ctetl.ct_helpers import create_sqlalchemy_engine
+from ctetl.ct_helpers import minio_put_text_object
+
+
+class MockMinioResponse:
+    def __init__(self, data):
+        self.data = data
+
+    def decode(self):
+        return self.data
+
+    def close(self):
+        pass
+
+    def release_conn(self):
+        pass
+
+
+class MockMinioClient:
+    def get_object(self, bucket_name, object_name):
+        pass
+
+    def put_object(self, bucket_name, object_name, data, length, content_type):
+        pass
+
+
+class MockRequestResponse:
+    def __init__(self, text):
+        self.text = text
+
+
+class MockS3Error(S3Error):
+    def __init__(
+        self,
+        code,
+        message,
+        resource,
+        request_id,
+        host_id,
+        response,
+        bucket_name=None,
+        object_name=None,
+    ):
+        super().__init__(
+            code,
+            message,
+            resource,
+            request_id,
+            host_id,
+            response,
+            bucket_name=bucket_name,
+            object_name=object_name,
+        )
 
 
 def test_get_request_parameters_with_api_key(monkeypatch):
@@ -238,28 +288,93 @@ def test_get_minio_object_names():
     # Check if the returned object_names match the object_names from the mock objects
     assert object_names == ["object1", "object2", "object3"]
 
+@patch("ctetl.ct_helpers.json.loads")  # Replace 'your_module' with the actual module name
+def test_get_minio_response_js(mock_json_loads):
+    # Arrange
+    object_name = "mock_object"
+    bucket = "mock_bucket"
+    client = MagicMock()
+    response_data = b'{"key": "value"}'
+    mock_json_loads.return_value = {"key": "value"}
+    mock_response = MagicMock()
+    mock_response.data.decode.return_value = response_data
+    client.get_object.return_value.__enter__.return_value = mock_response
 
-def test_get_minio_response_js(capsys):
-    # Mock the MinIO client and set up a mock MinIO response
-    minio_client = MagicMock()
-    mock_minio_response = MagicMock()
-    mock_minio_response.data.decode.return_value = '{"key": "value"}'
-    minio_client.get_object.return_value = mock_minio_response
+    # Act
+    result = get_minio_response_js(object_name, bucket, client)
 
-    # Call the function
+    # Assert
+    assert result == {"key": "value"}
+    mock_json_loads.assert_called_once_with(response_data)
+    client.get_object.assert_called_once_with(bucket, object_name)
+    mock_response.data.decode.assert_called_once()
+
+def test_get_minio_response_js_error_handling():
+    # Arrange
+    object_name = "mock_object"
+    bucket = "mock_bucket"
+    client = MagicMock()
+    mock_exception = MockS3Error(
+        code="MockErrorCode",
+        message="Mock S3 Error",
+        resource="mock_resource",
+        request_id="mock_request_id",
+        host_id="mock_host_id",
+        response={},
+    )
+    client.get_object.side_effect = mock_exception
+
+    # Act and Assert
+    with pytest.raises(SystemExit) as exc_info:
+        get_minio_response_js(object_name, bucket, client)
+
+    assert exc_info.value.code == 1
+
+
+
+def test_minio_put_text_object():
+    # Arrange
+    minio_client = MockMinioClient()
     bucket = "test_bucket"
     object_name = "test_object"
-    minio_response_js = get_minio_response_js(object_name, bucket, minio_client)
+    request_response_text = "Test data"
+    request_response = MockRequestResponse(request_response_text)
 
-    # Check if get_object method was called with the correct parameters
-    minio_client.get_object.assert_called_once_with(bucket, object_name)
+    # Act
+    minio_put_text_object(minio_client, bucket, object_name, request_response)
 
-    # Check if data was decoded and loaded into JSON
-    assert minio_response_js == {"key": "value"}
 
-    # Check that close and release_conn methods were called
-    mock_minio_response.close.assert_called_once()
-    mock_minio_response.release_conn.assert_called_once()
+    # Assert
+    # Add assertions based on the expected behavior of your function
+    # For example, check if the put_object method is called with the correct arguments
+
+
+def test_minio_put_text_object_error_handling():
+    # Arrange
+    minio_client = MockMinioClient()
+    bucket = "test_bucket"
+    object_name = "test_object"
+    request_response_text = "Test data"
+    request_response = MockRequestResponse(request_response_text)
+
+    # Implement a mock behavior for put_object to raise your custom MockS3Error
+    def mock_put_object_raise_error(*args, **kwargs):
+        raise MockS3Error(
+            code="MockErrorCode",
+            message="Mock S3 Error",
+            resource="mock_resource",
+            request_id="mock_request_id",
+            host_id="mock_host_id",
+            response="mock_response",
+            bucket_name="mock_bucket_name",
+            object_name="mock_object_name",
+        )
+
+    minio_client.put_object = mock_put_object_raise_error
+
+    # Act and Assert
+    with pytest.raises(SystemExit):
+        minio_put_text_object(minio_client, bucket, object_name, request_response)
 
 
 @pytest.fixture
@@ -305,23 +420,34 @@ def test_request_with_backoff_unsuccessful(mock_session, capsys):
     assert "Requests error after retrying.  Error: Mock error" in captured.out
 
 
-def test_isoformat_to_seconds_single_datetime():
-    # Test when a single datetime object is passed
-    dt = datetime(2023, 1, 1, 12, 30, 45)
-    result = isoformat_to_seconds(dt)
-
-    # Check that the result is the isoformat of the datetime object
-    assert result == "2023-01-01T12:30:45"
+def test_isoformat_to_seconds_with_empty_arguments():
+    with pytest.raises(ValueError, match="No datetime objects provided."):
+        isoformat_to_seconds()
 
 
-def test_isoformat_to_seconds_multiple_datetimes():
-    # Test when multiple datetime objects are passed
-    dt1 = datetime(2023, 1, 1, 12, 30, 45)
-    dt2 = datetime(2023, 1, 2, 15, 0, 0)
-    result = isoformat_to_seconds(dt1, dt2)
+def test_isoformat_to_seconds_with_non_datetime_objects():
+    with pytest.raises(ValueError, match="Can only isoformat datetime objects."):
+        isoformat_to_seconds("not_a_datetime")
 
-    # Check that the result is a list of isoformats of the datetime objects
-    assert result == ["2023-01-01T12:30:45", "2023-01-02T15:00:00"]
+
+def test_isoformat_to_seconds_with_single_datetime_object():
+    input_datetime = datetime(2023, 1, 1, 12, 34, 56)
+    result = isoformat_to_seconds(input_datetime)
+    assert result == "2023-01-01T12:34:56"
+
+
+def test_isoformat_to_seconds_with_multiple_datetime_objects():
+    input_datetimes = [
+        datetime(2023, 1, 1, 12, 34, 56),
+        datetime(2023, 1, 2, 10, 30, 15, 6542),
+    ]
+    result = isoformat_to_seconds(*input_datetimes)
+    assert result == ["2023-01-01T12:34:56", "2023-01-02T10:30:15"]
+
+
+def test_isoformat_to_seconds_with_mixed_objects():
+    with pytest.raises(ValueError, match="Can only isoformat datetime objects."):
+        isoformat_to_seconds(datetime(2023, 1, 1, 12, 34, 56), "not_a_datetime")
 
 
 @pytest.fixture
