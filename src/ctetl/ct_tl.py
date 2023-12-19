@@ -35,7 +35,12 @@ def load_columns_to_extract():
         "platform",
         "date",
         "type",
+        "title",
+        "caption",
+        "description",
         "message",
+        "expandedLinks",
+        "link",
         "postUrl",
         "subscriberCount",
         "account.id",
@@ -81,6 +86,8 @@ def load_column_remaps():
         "date": "posting_date",
         "type": "post_type",
         "message": "post_message",
+        "expandedLinks": "expanded_links",
+        "link": "post_link",
         "postUrl": "post_url",
         "subscriberCount": "subscriber_count",
         "account.id": "account_id",
@@ -103,7 +110,7 @@ def queries_for_insert():
     """
 
     ACCOUNTS_INSERT_QUERY = "INSERT INTO accounts VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (account_id) DO NOTHING"
-    POSTS_INSERT_QUERY = "INSERT INTO posts VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (platform_id) DO NOTHING"
+    POSTS_INSERT_QUERY = "INSERT INTO posts VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (platform_id) DO NOTHING"
     POST_METRICS_INSERT_QUERY = "INSERT INTO post_metrics VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (platform_id, as_of, score, metric_name, metric_value, metric_timestamp, metric_timestep) DO NOTHING"
 
     return ACCOUNTS_INSERT_QUERY, POSTS_INSERT_QUERY, POST_METRICS_INSERT_QUERY
@@ -154,7 +161,12 @@ def recast_posts(posts_df):
             "platform": "string",
             "posting_date": "datetime64[ns]",
             "post_type": "string",
+            "title": "string",
+            "caption": "string",
+            "description": "string",
             "post_message": "string",
+            "expanded_links": "string",
+            "post_link": "string",
             "post_url": "string",
             "subscriber_count": "int64",
             "account_id": "int64",
@@ -200,11 +212,22 @@ def transform_post_details(minio_response_js, detail_object_name):
         post_metrics_cols_remap,
     ) = load_column_remaps()
 
-    # Create accounts_df and posts_df from posts object
+    # Create intermediary df to make accounts_df and posts_df from posts object
     pa_df = pd.json_normalize(minio_response_js, record_path=["result", "posts"])
 
+    # Create accounts_df
     accounts_df = pa_df[accounts_cols].rename(columns=accounts_cols_remap)
-    posts_df = pa_df[posts_cols].rename(columns=posts_cols_remap)
+    
+    # Have to find the intersection of columns in pa_df and posts_cols
+    # if an attempt to extract columns in posts_cols not present in pa_df is made
+    # a KeyError will be raised
+    present_post_columns = list(set(pa_df.columns).intersection(posts_cols))
+    
+    # Extract present columns from pa_df
+    posts_df = pa_df[present_post_columns]
+    
+    # Create any missing columns from post_cols and fill with empty value.  Rename
+    posts_df = posts_df.reindex(columns=posts_cols, fill_value='').rename(columns=posts_cols_remap)
 
     # Create post_metrics_df from history object
     history_df = pd.json_normalize(
@@ -245,7 +268,8 @@ def transform_post_details(minio_response_js, detail_object_name):
     post_metrics_to_insert = [
         tuple(row) for row in recast_post_metrics_df.itertuples(index=False, name=None)
     ]
-
+    
+    print(detail_object_name)
     return accounts_to_insert, posts_to_insert, post_metrics_to_insert
 
 
