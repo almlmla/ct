@@ -131,7 +131,23 @@ def get_minio_object_names(minio_client, bucket):
     return [obj.object_name for obj in minio_client.list_objects(bucket)]
 
 
+
+
 def get_minio_response_js(object_name, bucket, client):
+    """
+    Process a MinIO object.
+    """
+    try:
+        with client.get_object(bucket, object_name) as minio_response:
+            minio_response_js = json.loads(minio_response.data.decode())
+    except S3Error as e:
+        print(f"S3 Error getting object: {e}")
+        sys.exit(1)
+
+    return minio_response_js
+
+
+def deprecate_get_minio_response_js(object_name, bucket, client):
     """
     Process a MinIO object.
     """
@@ -208,18 +224,28 @@ def isoformat_to_seconds(*datetimes):
     """
     Used by ct_bundled_posts_to_minio and ct_post_details_to_minio.
 
-    Convert times to string format compatible with API call requirements and object naming
+    Convert datetime objects to string format compatible with API call requirements and object naming
 
     """
 
-    if len(datetimes) == 1 and isinstance(datetimes[0], datetime):
-        # If only one argument is passed and it is a datetime object, convert it to isoformat
-        formatted_datetime = datetimes[0].isoformat(timespec="seconds")
-        return formatted_datetime
-    else:
-        # If multiple arguments or a non-datetime object is passed, convert all to isoformat
-        formatted_datetimes = [dt.isoformat(timespec="seconds") for dt in datetimes]
-        return formatted_datetimes
+    # Check for empty arguments
+    if not datetimes:
+        raise ValueError("No datetime objects provided.")
+    try:
+        if any(not isinstance(dt, datetime) for dt in datetimes):
+            raise ValueError("Can only isoformat datetime objects.")
+
+        if len(datetimes) == 1 and isinstance(datetimes[0], datetime):
+            # If only one argument is passed and it is a datetime object, convert it to isoformat
+            formatted_datetime = datetimes[0].isoformat(timespec="seconds")
+            return formatted_datetime
+        else:
+            # If multiple arguments convert all to isoformat
+            formatted_datetimes = [dt.isoformat(timespec="seconds") for dt in datetimes]
+            return formatted_datetimes
+    except ValueError as e:
+        print(f"Error: {e}")
+        raise
 
 
 #### Database functions
