@@ -5,9 +5,12 @@ import os
 import sys
 
 from datetime import datetime
+import time
+
 from minio import Minio
 from minio.error import S3Error
 
+import redis
 import requests
 from sqlalchemy import create_engine
 
@@ -17,6 +20,7 @@ from unittest.mock import Mock
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
 from ctetl.ct_helpers import get_request_parameters
+from ctetl.ct_helpers import create_redis_client
 from ctetl.ct_helpers import load_db_credentials
 from ctetl.ct_helpers import create_minio_client
 from ctetl.ct_helpers import check_minio_buckets
@@ -24,6 +28,7 @@ from ctetl.ct_helpers import create_minio_tags
 from ctetl.ct_helpers import get_minio_object_names
 from ctetl.ct_helpers import get_minio_response_js
 from ctetl.ct_helpers import request_with_backoff
+from ctetl.ct_helpers import allow_request
 from ctetl.ct_helpers import isoformat_to_seconds
 from ctetl.ct_helpers import create_sqlalchemy_engine
 from ctetl.ct_helpers import minio_put_text_object
@@ -78,6 +83,9 @@ class MockS3Error(S3Error):
             bucket_name=bucket_name,
             object_name=object_name,
         )
+
+
+### Functions to get parameters from environment
 
 
 def test_get_request_parameters_with_api_key(monkeypatch):
@@ -158,6 +166,41 @@ def test_load_db_credentials_with_empty_parameters(monkeypatch, capsys):
     monkeypatch.delenv("PGPASSWD", raising=False)
     monkeypatch.delenv("PGHOST", raising=False)
     monkeypatch.delenv("PGPORT", raising=False)
+
+
+### Redis functions
+
+
+def test_create_redis_client_success():
+    # Test the function when the Redis client is created successfully
+    redis_client = create_redis_client()
+    assert redis_client is not None
+    assert isinstance(redis_client, redis.StrictRedis)
+
+
+def test_create_redis_client_connection_error(monkeypatch):
+    # Test the function when there's a connection error
+    def mock_ping():
+        raise redis.exceptions.ConnectionError("Mock Connection Error")
+
+    monkeypatch.setattr('redis.StrictRedis.ping', mock_ping)
+    
+    redis_client = create_redis_client()
+    assert redis_client is None
+
+
+def test_create_redis_client_exception_handling(monkeypatch):
+    # Test the function's exception handling
+    def mock_exception():
+        raise Exception("Mock Exception")
+
+    monkeypatch.setattr('redis.StrictRedis.ping', mock_exception)
+    
+    redis_client = create_redis_client()
+    assert redis_client is None
+
+
+### MinIO functions
 
 
 def test_create_minio_client_with_valid_parameters(monkeypatch):
@@ -288,7 +331,8 @@ def test_get_minio_object_names():
     # Check if the returned object_names match the object_names from the mock objects
     assert object_names == ["object1", "object2", "object3"]
 
-@patch("ctetl.ct_helpers.json.loads")  # Replace 'your_module' with the actual module name
+
+@patch("ctetl.ct_helpers.json.loads")
 def test_get_minio_response_js(mock_json_loads):
     # Arrange
     object_name = "mock_object"
@@ -308,6 +352,7 @@ def test_get_minio_response_js(mock_json_loads):
     mock_json_loads.assert_called_once_with(response_data)
     client.get_object.assert_called_once_with(bucket, object_name)
     mock_response.data.decode.assert_called_once()
+
 
 def test_get_minio_response_js_error_handling():
     # Arrange
@@ -331,25 +376,32 @@ def test_get_minio_response_js_error_handling():
     assert exc_info.value.code == 1
 
 
+@pytest.fixture
+def minio_client():
+    return Mock()
 
-def test_minio_put_text_object():
-    # Arrange
-    minio_client = MockMinioClient()
+
+def test_minio_put_text_object_success(minio_client):
+    # Test the successful case of putting a text object
     bucket = "test_bucket"
-    object_name = "test_object"
-    request_response_text = "Test data"
-    request_response = MockRequestResponse(request_response_text)
+    object_name = "test_object.txt"
+    request_response = Mock(text="Hello, World!")
 
-    # Act
-    minio_put_text_object(minio_client, bucket, object_name, request_response)
+    with patch("ctetl.ct_helpers.io.BytesIO") as mock_bytesio:
+        minio_put_text_object(minio_client, bucket, object_name, request_response)
 
+    # Assertions
+    mock_bytesio.assert_called_once_with(request_response.text.encode("utf-8"))
+    minio_client.put_object.assert_called_once_with(
+        bucket_name=bucket,
+        object_name=object_name,
+        data=mock_bytesio(),
+        length=len(mock_bytesio()),
+        content_type="text/plain",
+    )
+    
 
-    # Assert
-    # Add assertions based on the expected behavior of your function
-    # For example, check if the put_object method is called with the correct arguments
-
-
-def test_minio_put_text_object_error_handling():
+def test_minio_put_text_object_s3_error_handling():
     # Arrange
     minio_client = MockMinioClient()
     bucket = "test_bucket"
@@ -375,6 +427,9 @@ def test_minio_put_text_object_error_handling():
     # Act and Assert
     with pytest.raises(SystemExit):
         minio_put_text_object(minio_client, bucket, object_name, request_response)
+
+    
+#### Web functions
 
 
 @pytest.fixture
@@ -420,6 +475,128 @@ def test_request_with_backoff_unsuccessful(mock_session, capsys):
     assert "Requests error after retrying.  Error: Mock error" in captured.out
 
 
+@pytest.fixture
+def redis_client():
+    # Create and return a Redis client instance
+    client = create_redis_client()
+    yield client
+
+
+@patch('ctetl.ct_helpers.redis.StrictRedis.lrange')
+@patch('ctetl.ct_helpers.redis.StrictRedis.rpop')
+@patch('ctetl.ct_helpers.redis.StrictRedis.rpush')
+@patch('time.sleep')
+def test_allow_request_allowed(mock_sleep, mock_rpush, mock_rpop, mock_lrange, redis_client):
+    # Test when the request is allowed
+    redis_key = "test_key"
+    rate_limit = 5
+    time_limit = 60
+
+    # Set up timestamps to simulate rate_limit not being reached
+    step = time_limit // rate_limit + 1
+    timestamps = [int(time.time()) - i for i in range((rate_limit)*step, 0, -step)]
+    mock_lrange.return_value = [str(ts).encode('utf-8') for ts in timestamps]
+
+    result = allow_request(redis_client, redis_key, rate_limit, time_limit)
+
+    assert result is True
+    mock_lrange.assert_called_once_with(redis_key, 0, -1)
+    assert not mock_rpop.called  # Ensure rpop is not called
+    mock_rpush.assert_called_once_with(redis_key, int(time.time()))
+    assert not mock_sleep.called  # Ensure time.sleep is not called
+
+
+@patch('ctetl.ct_helpers.redis.StrictRedis.lrange')
+@patch('ctetl.ct_helpers.redis.StrictRedis.rpop')
+@patch('ctetl.ct_helpers.redis.StrictRedis.rpush')
+@patch('time.sleep')
+def test_allow_request_denied(mock_sleep, mock_rpush, mock_rpop, mock_lrange, redis_client):
+    # Test when the request is denied due to rate_limit being reached
+    redis_key = "test_key"
+    rate_limit = 5
+    time_limit = 60
+
+    # Set up timestamps to simulate rate_limit being reached
+    step = time_limit // rate_limit
+    timestamps = [int(time.time()) - i for i in range((rate_limit)*step, 0, -step)]
+    mock_lrange.return_value = [str(ts).encode('utf-8') for ts in timestamps]
+
+    result = allow_request(redis_client, redis_key, rate_limit, time_limit)
+
+    assert result is False
+    mock_lrange.assert_called_once_with(redis_key, 0, -1)
+    assert not mock_rpop.called  # Ensure rpop is not called
+    mock_rpush.assert_not_called()
+    assert mock_sleep.called  # Ensure time.sleep is called
+
+
+@patch('ctetl.ct_helpers.redis.StrictRedis.lrange')
+@patch('ctetl.ct_helpers.redis.StrictRedis.rpush')
+def test_allow_request_empty_timestamps(mock_rpush, mock_lrange, redis_client):
+    # Test when the request is allowed even with empty timestamps
+    redis_key = "test_key"
+    rate_limit = 5
+    time_limit = 60
+
+    # Set up an empty list of timestamps
+    mock_lrange.return_value = []
+
+    result = allow_request(redis_client, redis_key, rate_limit, time_limit)
+
+    assert result is True
+    mock_lrange.assert_called_once_with(redis_key, 0, -1)
+    mock_rpush.assert_called_once_with(redis_key, int(time.time()))
+
+
+@patch('ctetl.ct_helpers.redis.StrictRedis.lrange')
+@patch('ctetl.ct_helpers.redis.StrictRedis.rpush')
+def test_allow_request_less_than_rate_limit(mock_rpush, mock_lrange, redis_client):
+    # Test when timestamps less than rate_limit
+    redis_key = "test_key"
+    rate_limit = 5
+    time_limit = 60
+
+    # Set up timestamps to simulate rate_limit not being reached
+    step = time_limit // rate_limit
+    timestamps = [int(time.time()) - i for i in range((rate_limit - 1)*step, 0, -step)]
+    mock_lrange.return_value = [str(ts).encode('utf-8') for ts in timestamps]
+
+    result = allow_request(redis_client, redis_key, rate_limit, time_limit)
+
+    assert result is True
+    mock_lrange.assert_called_once_with(redis_key, 0, -1)
+    mock_rpush.assert_called_once_with(redis_key, int(time.time()))
+
+
+@patch('ctetl.ct_helpers.redis.StrictRedis.lrange')
+@patch('ctetl.ct_helpers.redis.StrictRedis.rpop')
+@patch('ctetl.ct_helpers.redis.StrictRedis.rpush')
+@patch('time.sleep')
+def test_allow_request_more_than_rate_limit(mock_sleep, mock_rpush, mock_rpop, mock_lrange, redis_client):
+    # Test when timestamps more than rate_limit
+    redis_key = "test_key"
+    rate_limit = 5
+    time_limit = 60
+
+    # Set up timestamps to simulate rate_limit being exceeded
+    step = time_limit // rate_limit
+    timestamps = [int(time.time()) - i for i in range((rate_limit + 1)*step, 0, -step)]
+    print(timestamps)
+    mock_lrange.return_value = [str(ts).encode('utf-8') for ts in timestamps]
+
+    result = allow_request(redis_client, redis_key, rate_limit, time_limit)
+
+    assert result is True
+    mock_lrange.assert_called_once_with(redis_key, 0, -1)
+    assert mock_rpop.call_count == len(timestamps) - rate_limit
+    mock_rpush.assert_called_once_with(redis_key, int(time.time()))
+    assert mock_sleep.called_once_with(1)  # Adjust the sleep time if needed
+    assert result is True
+
+
+### Formatting functions
+
+
 def test_isoformat_to_seconds_with_empty_arguments():
     with pytest.raises(ValueError, match="No datetime objects provided."):
         isoformat_to_seconds()
@@ -448,6 +625,9 @@ def test_isoformat_to_seconds_with_multiple_datetime_objects():
 def test_isoformat_to_seconds_with_mixed_objects():
     with pytest.raises(ValueError, match="Can only isoformat datetime objects."):
         isoformat_to_seconds(datetime(2023, 1, 1, 12, 34, 56), "not_a_datetime")
+
+
+#### Database functions
 
 
 @pytest.fixture
