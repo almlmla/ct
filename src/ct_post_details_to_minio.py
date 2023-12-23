@@ -1,6 +1,7 @@
 #!/home/pscripts/venv/bin/python
 
 from ctetl.ct_helpers import get_request_parameters
+from ctetl.ct_helpers import get_request_parameters, create_minio_client
 from ctetl.ct_helpers import create_minio_client, check_minio_buckets
 from ctetl.ct_helpers import create_minio_tags, get_minio_object_names
 from ctetl.ct_extract import process_post_object

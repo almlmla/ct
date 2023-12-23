@@ -5,7 +5,10 @@ import json
 import os
 import sys
 from datetime import datetime
+import time
 
+import psycopg2
+import redis
 import requests
 from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
@@ -61,6 +64,27 @@ def load_db_credentials():
         sys.exit(1)
     else:
         return PGUSER, PGPASSWD, PGHOST, PGPORT, PGDB
+
+
+### Redis functions
+
+def create_redis_client():
+    """
+    Create a Redis client using standard parameters.
+    Redis server must already be running.
+    """
+    host = 'localhost'
+    port = 6379
+    db = 0
+    try:
+        # Attempt to create a Redis client
+        redis_client = redis.StrictRedis(host=host, port=port, db=db)
+        redis_client.ping()
+        return redis_client
+    except Exception as e:
+        # Handle exceptions, such as connection errors
+        print(f"Error creating Redis client: {e}")
+        return None
 
 
 ### MinIO functions
@@ -131,8 +155,6 @@ def get_minio_object_names(minio_client, bucket):
     return [obj.object_name for obj in minio_client.list_objects(bucket)]
 
 
-
-
 def get_minio_response_js(object_name, bucket, client):
     """
     Process a MinIO object.
@@ -143,23 +165,6 @@ def get_minio_response_js(object_name, bucket, client):
     except S3Error as e:
         print(f"S3 Error getting object: {e}")
         sys.exit(1)
-
-    return minio_response_js
-
-
-def deprecate_get_minio_response_js(object_name, bucket, client):
-    """
-    Process a MinIO object.
-    """
-    try:
-        minio_response = client.get_object(bucket, object_name)
-        minio_response_js = json.loads(minio_response.data.decode())
-    except S3Error as e:
-        print(f"S3 Error getting object: {e}")
-        sys.exit(1)
-    finally:
-        minio_response.close()
-        minio_response.release_conn()
 
     return minio_response_js
 
@@ -217,7 +222,55 @@ def request_with_backoff(url, headers=None):
         return None
 
 
-### Functions for formatting
+def allow_request(redis_client, redis_key, rate_limit, time_limit):
+    """
+    Check data at redis_key if request is allowed within rate_limit and time_limit.
+    Function will sleep if rate if above rate limit and will return False.  Use within
+    a while loop until function return True.
+    
+    Assumes redis_key is only used for this function and the data are timestamps.  
+    No checks are made to validate this assumption.  If using this function to limit
+    API calls, using the API key as the redis_key is recommended.
+    
+    """
+    request_time = int(time.time())
+    
+    # Retrieve the current list of timestamps from Redis
+    timestamps_bytes = redis_client.lrange(redis_key, 0, -1)
+    
+    # Convert timestamps from bytes to floats
+    timestamps = [int(round(float(ts))) for ts in timestamps_bytes]
+  
+    # If more timestamps than rate_limit, trim to rate_limit elements
+    if len(timestamps) > rate_limit:
+        for _ in range(len(timestamps) - rate_limit):
+            # Popping from right to keep earliest request time
+            redis_client.rpop(redis_key)    
+
+    # Assign current_window.  If timestamps is empty make current_window bigger than time_limit
+    current_window = request_time - timestamps[0] if timestamps else time_limit + 1
+
+    if len(timestamps) < rate_limit:  
+        redis_client.rpush(redis_key, request_time)
+        return True
+    else:
+        # May want to buffering with an additional time_buffer
+        time_buffer = 1
+        if current_window - time_buffer  < time_limit: # Not enough time has passed.  Deny and sleep.
+            # sleep_time = time_limit - current_window + time_buffer
+            sleep_time = time_limit - current_window + time_buffer
+            # Deny and sleep for sleep_time
+            time.sleep(sleep_time)
+            return False
+        else: # Enough time has passed.  Allow request.  
+            # Pop the previous oldest timestamp
+            previous_oldest = redis_client.lpop(redis_key)
+            # Push current time into timestamps
+            redis_client.rpush(redis_key, request_time)
+            return True
+            
+            
+### Formatting functions
 
 
 def isoformat_to_seconds(*datetimes):
@@ -256,3 +309,65 @@ def create_sqlalchemy_engine():
     PGUSER, PGPASSWD, PGHOST, PGPORT, PGDB = load_db_credentials()
     engine_string = f"postgresql://{PGUSER}:{PGPASSWD}@{PGHOST}:{PGPORT}/{PGDB}"
     return create_engine(engine_string)
+    
+
+#### Sliding window
+
+class SQLSlidingWindowRateLimiter:
+    def __init__(self, max_requests, interval_seconds, db_params):
+        self.max_requests = max_requests
+        self.interval_seconds = interval_seconds
+        self.timestamps = deque()
+        self.db_params = db_params
+
+        # Create or connect to the PostgreSQL database
+        self.connection = psycopg2.connect(**self.db_params)
+        self.create_table()
+
+    def create_table(self):
+        # Create a table to store the timestamp counter
+        create_table_query = '''
+        CREATE TABLE IF NOT EXISTS rate_limit (
+            id SERIAL PRIMARY KEY,
+            timestamp DOUBLE PRECISION
+        );
+        '''
+        with self.connection.cursor() as cursor:
+            cursor.execute(create_table_query)
+
+        # Query PostgreSQL to fetch the latest timestamp
+        select_latest_timestamp_query = 'SELECT MAX(timestamp) FROM rate_limit;'
+        with self.connection.cursor() as cursor:
+            cursor.execute(select_latest_timestamp_query)
+            result = cursor.fetchone()
+            if result and result[0] is not None:
+                # Set the timestamps deque with the latest timestamp
+                self.timestamps = deque([result[0]])
+
+        self.connection.commit()
+
+    def is_allowed(self):
+        current_time = time.time()
+
+        # Remove timestamps that are older than the specified interval
+        while self.timestamps and self.timestamps[0] < current_time - self.interval_seconds:
+            self.timestamps.popleft()
+
+        # Check if the number of requests is within the limit
+        if len(self.timestamps) < self.max_requests:
+            # Add the current timestamp to the deque
+            self.timestamps.append(current_time)
+
+            # Store the timestamp in the database
+            self.store_timestamp(current_time)
+
+            return True
+        else:
+            return False
+
+    def store_timestamp(self, timestamp):
+        # Store the timestamp in the database
+        insert_query = 'INSERT INTO rate_limit (timestamp) VALUES (%s);'
+        with self.connection.cursor() as cursor:
+            cursor.execute(insert_query, (timestamp,))
+        self.connection.commit()

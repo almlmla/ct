@@ -3,10 +3,12 @@
 import sys
 
 from datetime import datetime, timedelta, timezone
+import time
 from time import sleep
 
 from minio.error import S3Error
 
+from .ct_helpers import create_redis_client, allow_request
 from .ct_helpers import get_minio_object_names, request_with_backoff
 from .ct_helpers import minio_put_text_object
 from .ct_helpers import get_minio_response_js, isoformat_to_seconds
@@ -189,6 +191,9 @@ def get_and_save_post_details(
     are uploaded.
     """
 
+    redis_client = create_redis_client()
+    redis_key = ct_key
+
     # Post details are uniquely identified by platformId
     # Number of posts in minio_response_js is half the count of platformId
     for i in range(str(minio_response_js).count("platformId") // 2):
@@ -196,15 +201,12 @@ def get_and_save_post_details(
 
         # URL for specific posts
         url = f"https://api.crowdtangle.com/post/{platform_id}?token={ct_key}&includeHistory=True"
-
-        # If num_calls >5, sleep for 60 seconds to accommodate and respect
-        # CrowdTangle's API rate limit of 6 calls/minute
-        if num_calls > 5:
-            sleep(60)
-            num_calls = 0
-
+        allowed = False
+        while not allowed:
+            # Keep looping until allowed by the rate limiter
+            # CrowdTangle's limit is 6 requests in 60 seconds
+            allowed = allow_request(redis_client, redis_key, 6, 60)
         request_response = request_with_backoff(url, request_headers)
-        num_calls += 1
 
         if request_response is None:
             sys.exit(1)
