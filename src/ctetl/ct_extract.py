@@ -15,7 +15,7 @@ from .ct_helpers import get_minio_response_js, isoformat_to_seconds
 
 
 ### Functions of ct_bundled_posts_to_minio
-def get_initial_start_and_end(minio_client, posts_bucket):
+def get_initial_start_and_end(now, minio_client, posts_bucket):
     """
     Used by ct_bundled_posts_to_minio.
 
@@ -42,7 +42,6 @@ def get_initial_start_and_end(minio_client, posts_bucket):
     START_LIMIT_HOURS = 72
 
     # Assign start_limit from START_LIMIT_HOURS
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
     start_limit = now - timedelta(hours=START_LIMIT_HOURS)
 
     # Determine start by comparing MAIDEN_START_STR with the timestamp of
@@ -57,7 +56,7 @@ def get_initial_start_and_end(minio_client, posts_bucket):
     end = start + TIME_WINDOW
 
     # Also return 'now' as it is used in object naming
-    return start, end, now
+    return start, end
 
 
 def set_start(minio_client, posts_bucket, MAIDEN_START_STR):

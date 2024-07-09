@@ -1,7 +1,6 @@
 #!/home/pscripts/venv/bin/python
 
-import time
-from time import sleep
+from datetime import datetime, timezone
 
 from ctetl.ct_helpers import get_request_parameters, create_minio_client
 from ctetl.ct_helpers import create_redis_client, allow_request
@@ -14,10 +13,10 @@ from ctetl.ct_extract import get_and_save_ct_post_aggregates, get_posts_next_pag
 def main():
     # Load request parameters to use
     REQUEST_HEADERS, CT_KEY = get_request_parameters()
-    
+
     # Create redis client
     redis_client = create_redis_client()
-    redis_key = CT_KEY 
+    redis_key = CT_KEY
 
     # Bundled post objects are saved in 'ct-posts' that must already exist
     posts_bucket = "ct-posts"
@@ -30,7 +29,8 @@ def main():
 
     # Determine start and end times of bundled posts to get from CrowdTangle.
     # Also 'get' now to save as part of with object name
-    start, end, now = get_initial_start_and_end(minio_client, posts_bucket)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    start, end = get_initial_start_and_end(now, minio_client, posts_bucket)
 
     # Convert times to string format compatible with API call
     # requirements and object naming
@@ -52,7 +52,9 @@ def main():
         while not allowed:
             # Keep looping until allowed by the rate limiter
             # CrowdTangle's limit is 6 requests in 60 seconds
-            allowed = allow_request(redis_client, redis_key, 6, 60) # 6 requests in 60 seconds
+            allowed = allow_request(
+                redis_client, redis_key, 6, 60
+            )  # 6 requests in 60 seconds
         request_response = get_and_save_ct_post_aggregates(
             url,
             REQUEST_HEADERS,
@@ -68,6 +70,7 @@ def main():
 
         # Find subsequent page if it exists, else empty url exits the loop
         url = get_posts_next_page_url(request_response)
+
 
 if __name__ == "__main__":
     main()
